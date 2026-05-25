@@ -69,6 +69,14 @@ class ResponseParser:
     def stream_chunk(self, delta_text: str, delta_token_ids: list[int], **kwargs) -> tuple[DeltaMessage | None, bool]:
         raise NotImplementedError
 
+    def has_queued_deltas(self) -> bool:
+        """Return True if there are pending deltas queued from previous streams."""
+        return False
+
+    def dequeue_delta(self) -> tuple[DeltaMessage | None, bool]:
+        """Pop and return the next queued delta if available."""
+        return None, False
+
     @abstractmethod
     def parse_complete(self,
                        text: str,
@@ -273,12 +281,19 @@ class BaseResponseParser(ResponseParser):
         # 5. Special case: a trailing empty delta (delta_text == '') after non-empty
         # output should be surfaced as an explicit empty content delta so that
         # streaming clients see the final "no-op" chunk (some backends do this).
-        if (
-            delta_text == ''
-            and not produced_any
-            and self._accumulated_text != ''
-        ):
+        if delta_text == '' and not produced_any and self._accumulated_text != '':
             self._queued_deltas.append(_QueuedDelta(DeltaMessage(role='assistant', content=''), False))
+        if not self._queued_deltas:
+            return None, False
+        queued = self._queued_deltas.pop(0)
+        return queued.delta, queued.tool_calls_emitted
+
+    def has_queued_deltas(self) -> bool:
+        """Return True if there are pending deltas queued from previous streams."""
+        return len(self._queued_deltas) > 0
+
+    def dequeue_delta(self) -> tuple[DeltaMessage | None, bool]:
+        """Pop and return the next queued delta if available."""
         if not self._queued_deltas:
             return None, False
         queued = self._queued_deltas.pop(0)

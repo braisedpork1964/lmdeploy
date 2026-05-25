@@ -543,37 +543,57 @@ async def chat_completions_v1(request: ChatCompletionRequest, raw_request: Reque
                 res.response,
                 delta_token_ids
             )
-            if tool_emitted:
-                streaming_tools = True
+            
+            chunk_routed_experts = res.routed_experts if res.finish_reason is not None else None
+            chunk_output_ids = delta_token_ids if request.return_token_ids else None
+            
+            while True:
+                if tool_emitted:
+                    streaming_tools = True
 
-            if (request.tool_choice != 'none' and response_parser.tool_parser is not None):
-                if res.finish_reason == 'stop' and streaming_tools is True:
-                    res.finish_reason = 'tool_calls'
+                if (request.tool_choice != 'none' and response_parser.tool_parser is not None):
+                    if res.finish_reason == 'stop' and streaming_tools is True:
+                        res.finish_reason = 'tool_calls'
 
-            # The parser may intentionally suppress no-op chunks by returning
-            # ``None``. Keep them suppressed unless this is a visible terminal
-            # frame (finish/usage/logprobs), where OpenAI-style streams still
-            # expect a delta object.
-            if delta_message is None:
-                if res.finish_reason is None and usage is None and logprobs is None:
-                    continue
-                delta_message = DeltaMessage(role='assistant')
+                actual_delta_message = delta_message
+                if actual_delta_message is None:
+                    if res.finish_reason is None and usage is None and logprobs is None:
+                        if hasattr(response_parser, 'has_queued_deltas') and response_parser.has_queued_deltas():
+                            delta_message, tool_emitted = response_parser.dequeue_delta()
+                            continue
+                        else:
+                            break
+                    actual_delta_message = DeltaMessage(role='assistant')
 
-            # Only output routed_experts in the final chunk
-            routed_experts = res.routed_experts if res.finish_reason is not None else None
-            stream_output_ids = delta_token_ids if request.return_token_ids else None
-
-            response_json = create_stream_response_json(index=0,
-                                                        delta_message=delta_message,
-                                                        finish_reason=res.finish_reason,
-                                                        logprobs=logprobs,
-                                                        usage=usage,
-                                                        routed_experts=routed_experts,
-                                                        output_ids=stream_output_ids)
-            if res.cache_block_ids is not None:
-                response_json['cache_block_ids'] = res.cache_block_ids
-                response_json['remote_token_ids'] = res.token_ids
-            yield f'data: {response_json}\n\n'
+                actual_routed_experts = chunk_routed_experts
+                stream_output_ids = chunk_output_ids
+                
+                actual_finish_reason = res.finish_reason
+                if hasattr(response_parser, 'has_queued_deltas') and response_parser.has_queued_deltas():
+                    actual_finish_reason = None
+                
+                response_json = create_stream_response_json(index=0,
+                                                            delta_message=actual_delta_message,
+                                                            finish_reason=actual_finish_reason,
+                                                            logprobs=logprobs,
+                                                            usage=usage,
+                                                            routed_experts=actual_routed_experts,
+                                                            output_ids=stream_output_ids)
+                if res.cache_block_ids is not None:
+                    response_json['cache_block_ids'] = res.cache_block_ids
+                    response_json['remote_token_ids'] = res.token_ids
+                yield f'data: {response_json}\n\n'
+                
+                chunk_routed_experts = None
+                chunk_output_ids = None
+                
+                if hasattr(response_parser, 'has_queued_deltas') and response_parser.has_queued_deltas():
+                    delta_message, tool_emitted = response_parser.dequeue_delta()
+                    usage = None
+                    logprobs = None
+                else:
+                    break
+                
         yield 'data: [DONE]\n\n'
 
     # Streaming response
